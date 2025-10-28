@@ -2,6 +2,7 @@ library(shiny)
 library(shinydashboard)
 library(DT)
 library(ggplot2)
+library(patchwork)
 library(dplyr)
 library(readr)
 
@@ -433,14 +434,214 @@ analyze_jump_data_with_selection <- function(selected_data, body_mass,
   })
 }
 
+# ---- FIGURE COMPOSITE A-E : rapport graphique complet ----
+make_jump_report <- function(selected_data, results,
+                             athlete_name = "Athlète",
+                             session_date = Sys.Date(),
+                             sampling_hz = NA_real_) {
+  stopifnot(!is.null(selected_data), !is.null(results))
+
+  # Récup infos/événements
+  bw   <- results$body_weight
+  m    <- results$body_mass
+  t0   <- results$movement_start_time
+  t_to <- results$takeoff_time
+  t_ld <- results$landing_time
+  push_time <- results$push_time
+  vdec <- results$takeoff_velocity
+  h    <- results$jump_height
+  vel_df <- results$velocity_data
+
+  # 1) Reconstruire les données "push" et puissances instantanées
+  # On ne garde que la poussée pour B/C/E et calculs avancés
+  push_df <- selected_data |>
+    dplyr::filter(abs_time_s >= t0, abs_time_s <= t_to) |>
+    dplyr::arrange(abs_time_s) |>
+    dplyr::mutate(
+      force_nette = Fz_N - bw,
+      dt = c(0, diff(abs_time_s))
+    )
+
+  # Joindre la vitesse/accélération calculées dans analyze_jump_data_with_selection()
+  if (!is.null(vel_df) && nrow(vel_df) > 1) {
+    push_df <- dplyr::left_join(push_df, vel_df, by = "abs_time_s")
+  } else {
+    # Si pas de vitesse (ne devrait pas arriver vu ton code), on met des NA
+    push_df$velocity_ms <- NA_real_
+    push_df$acceleration_ms2 <- NA_real_
+  }
+
+  # Puissance instantanée (W) = force_nette (N) * vitesse (m/s)
+  push_df <- push_df |>
+    dplyr::mutate(power_w = force_nette * velocity_ms)
+
+  # Pmax instantanée (vraie) et relative
+  Pmax_inst <- suppressWarnings(max(push_df$power_w, na.rm = TRUE))
+  if (!is.finite(Pmax_inst)) Pmax_inst <- NA_real_
+  Pmax_rel  <- if (is.finite(Pmax_inst) && !is.na(m) && m > 0) Pmax_inst / m else NA_real_
+
+  # 2) RFD (méthode 1/3 – 2/3 de la poussée)
+  # t1 = t0 + 1/3 * push_time ; t2 = t0 + 2/3 * push_time
+  t1 <- if (!is.na(push_time)) t0 + push_time/3 else NA_real_
+  t2 <- if (!is.na(push_time)) t0 + 2*push_time/3 else NA_real_
+
+  # Interpolation force nette aux instants t1 et t2
+  # On protège l’interpolation si t1/t2 en dehors du domaine
+  interp_force <- function(tq) {
+    if (is.na(tq)) return(NA_real_)
+    if (tq < min(push_df$abs_time_s, na.rm = TRUE) ||
+        tq > max(push_df$abs_time_s, na.rm = TRUE)) return(NA_real_)
+    approx(x = push_df$abs_time_s, y = push_df$force_nette, xout = tq)$y
+  }
+  F1 <- interp_force(t1)
+  F2 <- interp_force(t2)
+
+  RFD_13_23 <- if (is.finite(F1) && is.finite(F2) && is.finite(t1) && is.finite(t2) && (t2 > t1)) {
+    (F2 - F1) / (t2 - t1)  # N/s
+  } else NA_real_
+
+  # Temps au pic de force (en % de la poussée)
+  idx_Fmax <- suppressWarnings(which.max(push_df$force_nette))
+  t_Fmax   <- if (length(idx_Fmax) && is.finite(push_df$abs_time_s[idx_Fmax])) push_df$abs_time_s[idx_Fmax] else NA_real_
+  time_to_Fmax_pct <- if (is.finite(t_Fmax) && !is.na(push_time) && push_time > 0) {
+    100 * (t_Fmax - t0) / push_time
+  } else NA_real_
+
+  # 3) PANELS
+
+  # ----- Panel A : Force-Temps complet (avec zones/événements) -----
+  # On utilise la fenêtre sélectionnée par l’utilisateur (inclut classiquement poussée + vol + réception)
+  full_df <- selected_data |> dplyr::arrange(abs_time_s)
+
+  # Définition des zones (statique / poussée / vol / réception) pour shading
+  # NB : si un des temps est NA, on omet la zone correspondante.
+  zones <- list(
+    static    = if (is.finite(t0)) c(xmin = min(full_df$abs_time_s), xmax = t0) else NULL,
+    push      = if (is.finite(t0) && is.finite(t_to)) c(xmin = t0, xmax = t_to) else NULL,
+    flight    = if (is.finite(t_to) && is.finite(t_ld)) c(xmin = t_to, xmax = t_ld) else NULL,
+    reception = if (is.finite(t_ld)) c(xmin = t_ld, xmax = max(full_df$abs_time_s)) else NULL
+  )
+
+  pA <- ggplot(full_df, aes(abs_time_s, Fz_N)) +
+    { if (!is.null(zones$static))    annotate("rect", xmin = zones$static["xmin"], xmax = zones$static["xmax"], ymin = -Inf, ymax = Inf, fill = "grey90") } +
+    { if (!is.null(zones$push))      annotate("rect", xmin = zones$push["xmin"], xmax = zones$push["xmax"], ymin = -Inf, ymax = Inf, fill = "steelblue", alpha = 0.08) } +
+    { if (!is.null(zones$flight))    annotate("rect", xmin = zones$flight["xmin"], xmax = zones$flight["xmax"], ymin = -Inf, ymax = Inf, fill = "grey80", alpha = 0.5) } +
+    { if (!is.null(zones$reception)) annotate("rect", xmin = zones$reception["xmin"], xmax = zones$reception["xmax"], ymin = -Inf, ymax = Inf, fill = "grey90") } +
+    geom_hline(yintercept = bw, linetype = "dashed", size = 0.7, color = "blue") +
+    geom_line(size = 0.7, color = "blue") +
+    { if (is.finite(t0)) geom_vline(xintercept = t0, color = "darkgreen", size = 0.9) } +
+    { if (is.finite(t_to)) geom_vline(xintercept = t_to, color = "orange", size = 0.9) } +
+    { if (is.finite(t_ld)) geom_vline(xintercept = t_ld, color = "purple", size = 0.9) } +
+    labs(title = "A — Force verticale (N) vs Temps (s)",
+         subtitle = sprintf("%s — %s — Masse: %.1f kg", athlete_name, as.character(session_date), m),
+         x = "Temps (s)", y = "Force (N)") +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(face = "bold"))
+
+  # Annotations clés Panel A
+  ann_A <- c(
+    if (is.finite(push_time)) sprintf("Temps poussée: %d ms", round(push_time*1000)) else NULL,
+    if (is.finite(floor(results$flight_time*1000))) sprintf("Temps vol: %d ms", round(results$flight_time*1000)) else NULL,
+    if (is.finite(h)) sprintf("Hauteur: %.1f cm", h*100) else NULL
+  )
+  if (length(ann_A)) {
+    pA <- pA + annotate("text", x = Inf, y = Inf, label = paste(ann_A, collapse = "  •  "),
+                        hjust = 1.02, vjust = 1.5, size = 3.5)
+  }
+
+  # ----- Panel B : Vitesse (poussée) -----
+  pB <- ggplot(push_df, aes(abs_time_s, velocity_ms)) +
+    geom_line(size = 1.0, color = "orange") +
+    { if (is.finite(results$mean_velocity_push)) geom_hline(yintercept = results$mean_velocity_push, linetype = "dashed", color = "orange") } +
+    { if (is.finite(vdec)) geom_hline(yintercept = vdec, linetype = "dotted", color = "red") } +
+    labs(title = "B — Vitesse (m/s) pendant la poussée",
+         x = "Temps (s)", y = "Vitesse (m/s)") +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(face = "bold"))
+
+  # ----- Panel C : Accélération (poussée) -----
+  pC <- ggplot(push_df, aes(abs_time_s, acceleration_ms2)) +
+    geom_line(size = 1.0, color = "darkgreen") +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    labs(title = "C — Accélération (m/s²) pendant la poussée",
+         x = "Temps (s)", y = "Accélération (m/s²)") +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(face = "bold"))
+
+  # ----- Panel D : Métriques principales (tableau texte) -----
+  # On construit un "dashboard" textuel
+  met_lines <- c(
+    sprintf("Hauteur saut: %s", if (is.finite(h)) sprintf("%.1f cm", 100*h) else "N/A"),
+    sprintf("Temps vol: %s", if (is.finite(results$flight_time)) sprintf("%d ms", round(results$flight_time*1000)) else "N/A"),
+    sprintf("Temps poussée: %s", if (is.finite(push_time)) sprintf("%d ms", round(push_time*1000)) else "N/A"),
+    sprintf("Force max: %s", if (isTRUE(is.finite(max(selected_data$Fz_N)))) sprintf("%.0f N (%.1f N/kg)", max(selected_data$Fz_N, na.rm = TRUE), max(selected_data$Fz_N, na.rm = TRUE)/m) else "N/A"),
+    sprintf("Force moy (poussée): %s", if (is.finite(results$mean_force_push)) sprintf("%.0f N (%.1f N/kg)", results$mean_force_push, results$mean_force_push/m) else "N/A"),
+    sprintf("Impulsion nette: %s", if (is.finite(results$net_impulse)) sprintf("%.1f N·s", results$net_impulse) else "N/A"),
+    sprintf("Vitesse décollage: %s", if (is.finite(vdec)) sprintf("%.2f m/s", vdec) else "N/A"),
+    sprintf("Vitesse moy (poussée): %s", if (is.finite(results$mean_velocity_push)) sprintf("%.2f m/s", results$mean_velocity_push) else "N/A"),
+    sprintf("Puissance max (inst.): %s", if (is.finite(Pmax_inst)) sprintf("%.0f W (%.1f W/kg)", Pmax_inst, Pmax_rel) else "N/A"),
+    sprintf("RFD (1/3–2/3): %s", if (is.finite(RFD_13_23)) sprintf("%.0f N/s", RFD_13_23) else "N/A"),
+    sprintf("Ratio Fmax/Poids: %s", if (isTRUE(is.finite(max(selected_data$Fz_N)))) sprintf("%.2f", max(selected_data$Fz_N, na.rm = TRUE)/bw) else "N/A"),
+    sprintf("Temps au pic de force: %s", if (is.finite(time_to_Fmax_pct)) sprintf("%.0f %% poussée", time_to_Fmax_pct) else "N/A")
+  )
+  d_text <- data.frame(x = 0, y = rev(seq_along(met_lines)), lab = rev(met_lines))
+  pD <- ggplot(d_text, aes(x, y, label = lab)) +
+    geom_text(hjust = 0, size = 3.6) +
+    xlim(0, 1) + ylim(0, length(met_lines)+1) +
+    labs(title = "D — Métriques principales") +
+    theme_void(base_size = 12) +
+    theme(plot.title = element_text(face = "bold"))
+
+  # ----- Panel E : Profil technique (Force nette vs Vitesse) -----
+  pE <- ggplot(push_df, aes(x = velocity_ms, y = force_nette)) +
+    geom_point(size = 1.6, alpha = 0.6, color = "blue") +
+    geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "blue") +
+    labs(title = "E — Force nette (N) vs Vitesse (m/s)",
+         x = "Vitesse (m/s)", y = "Force nette (N)") +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(face = "bold"))
+
+  # 4) Assemblage (portrait) : A pleine largeur ; B|C ; D|E
+  top <- pA
+  mid <- pB + pC
+  bot <- pD + pE
+  fig <- top / mid / bot +
+    plot_annotation(
+      caption = sprintf("Méthodo : seuil décollage 10%% du poids | %s | %s",
+                        if (is.finite(sampling_hz)) sprintf("Fréq. échantillonnage %.0f Hz", sampling_hz) else "Fréq. échantillonnage N/A",
+                        "Modèle force-vitesse : intégration vitesse, Pmax instantanée"),
+      theme = theme(plot.caption = element_text(size = 9))
+    )
+
+  # On renvoie l’objet ggplot patchwork + une liste de métriques utiles
+  list(
+    figure = fig,
+    metrics = list(
+      Pmax_inst = Pmax_inst,
+      Pmax_rel = Pmax_rel,
+      RFD_13_23 = RFD_13_23,
+      time_to_Fmax_pct = time_to_Fmax_pct
+    )
+  )
+}
+
+# ---- Helper pratique pour sauvegarder en PDF ----
+save_jump_report_pdf <- function(report_obj, file = "rapport_saut.pdf", width = 8.27, height = 11.69) {
+  # dimensions par défaut = A4 portrait en pouces (approx 8.27 x 11.69)
+  stopifnot(!is.null(report_obj$figure))
+  ggplot2::ggsave(filename = file, plot = report_obj$figure, width = width, height = height, units = "in")
+  invisible(file)
+}
+
 # ===== UI =====
 ui <- dashboardPage(
   dashboardHeader(title = "Analyse Saut + Vitesse"),
   
   dashboardSidebar(
-    sidebarMenu(
+    sidebarMenu(id = "tabs",
       menuItem("Analyse", tabName = "analysis", icon = icon("chart-line")),
       menuItem("Vitesse", tabName = "velocity", icon = icon("tachometer-alt")),
+      menuItemOutput("report_menu"),
       menuItem("Paramètres", tabName = "settings", icon = icon("cogs"))
     )
   ),
@@ -453,8 +654,9 @@ ui <- dashboardPage(
                   title = "1. Chargement", status = "primary", solidHeader = TRUE, width = 4,
                   fileInput("file", "Fichier .txt", accept = c(".txt")),
                   numericInput("body_mass", "Masse (kg)", 70, min = 30, max = 150, step = 0.1),
+                  textInput("athlete_name", "Nom de l’athlète", value = ""),
                   hr(),
-                  
+
                   h4("2. Sélection de plage"),
                   conditionalPanel(
                     condition = "output.file_loaded",
@@ -491,7 +693,9 @@ ui <- dashboardPage(
                   condition = "output.analysis_done",
                   box(
                     title = "Résultats", status = "info", solidHeader = TRUE, width = 12,
-                    tableOutput("results_table")
+                    tableOutput("results_table"),
+                    br(),
+                    actionButton("open_report_tab", "Voir le rapport complet", icon = icon("file-pdf"), class = "btn-primary")
                   )
                 )
               )
@@ -503,25 +707,40 @@ ui <- dashboardPage(
                 conditionalPanel(
                   condition = "output.analysis_done",
                   box(
-                    title = "Vitesse instantanée pendant la poussée", 
+                    title = "Vitesse instantanée pendant la poussée",
                     status = "warning", solidHeader = TRUE, width = 12,
                     plotOutput("velocity_plot", height = "400px")
                   )
                 )
               ),
-              
+
               fluidRow(
                 conditionalPanel(
                   condition = "output.analysis_done",
                   box(
-                    title = "Accélération instantanée pendant la poussée", 
+                    title = "Accélération instantanée pendant la poussée",
                     status = "info", solidHeader = TRUE, width = 12,
                     plotOutput("acceleration_plot", height = "400px")
                   )
                 )
               )
       ),
-      
+
+      tabItem(tabName = "report",
+              fluidRow(
+                conditionalPanel(
+                  condition = "output.analysis_done",
+                  box(
+                    title = "Rapport complet du saut",
+                    status = "primary", solidHeader = TRUE, width = 12,
+                    plotOutput("report_plot", height = "900px"),
+                    br(),
+                    downloadButton("download_report", "Télécharger en PDF", icon = icon("file-download"))
+                  )
+                )
+              )
+      ),
+
       tabItem(tabName = "settings",
               box(
                 title = "Paramètres avancés", status = "warning", solidHeader = TRUE, width = 6,
@@ -541,6 +760,7 @@ server <- function(input, output, session) {
   original_data <- reactiveVal(NULL)
   selected_data <- reactiveVal(NULL)
   analysis_results <- reactiveVal(NULL)
+  report_obj <- reactiveVal(NULL)
   
   observeEvent(input$reset_params, {
     updateNumericInput(session, "movement_window", value = 10)
@@ -550,11 +770,14 @@ server <- function(input, output, session) {
   
   observeEvent(input$file, {
     req(input$file)
+    selected_data(NULL)
+    analysis_results(NULL)
+    report_obj(NULL)
     tryCatch({
       data <- import_force_data(input$file$datapath)
       original_data(data)
-      
-      updateNumericInput(session, "start_time", 
+
+      updateNumericInput(session, "start_time",
                          value = round(min(data$abs_time_s), 2),
                          min = min(data$abs_time_s),
                          max = max(data$abs_time_s))
@@ -576,7 +799,9 @@ server <- function(input, output, session) {
       data <- original_data()
       selected <- select_data_range(data, input$start_time, input$end_time)
       selected_data(selected)
-      showNotification(paste(nrow(selected), "échantillons sélectionnés"), 
+      analysis_results(NULL)
+      report_obj(NULL)
+      showNotification(paste(nrow(selected), "échantillons sélectionnés"),
                        type = "success", duration = 3)
     }, error = function(e) {
       showNotification(paste("Erreur:", e$message), type = "error")
@@ -595,12 +820,41 @@ server <- function(input, output, session) {
         movement_window_size = input$movement_window,
         movement_consecutive_points = input$consecutive_points
       )
-      
+
       analysis_results(results)
+      athlete_name <- input$athlete_name
+      if (is.null(athlete_name) || !nzchar(trimws(athlete_name))) {
+        athlete_name <- "Athlète"
+      }
+
+      selected <- selected_data()
+      sampling_hz <- NA_real_
+      if (!is.null(selected) && nrow(selected) > 1) {
+        dt <- diff(selected$abs_time_s)
+        dt <- dt[is.finite(dt) & dt > 0]
+        if (length(dt) > 0) {
+          sampling_hz <- 1 / mean(dt)
+        }
+      }
+
+      report <- tryCatch({
+        make_jump_report(
+          selected_data = selected,
+          results = results,
+          athlete_name = athlete_name,
+          session_date = Sys.Date(),
+          sampling_hz = sampling_hz
+        )
+      }, error = function(err) {
+        showNotification(paste("Erreur rapport:", err$message), type = "error")
+        NULL
+      })
+      report_obj(report)
       removeNotification("analyzing")
       showNotification("Analyse terminée!", type = "success", duration = 3)
     }, error = function(e) {
       removeNotification("analyzing")
+      report_obj(NULL)
       showNotification(paste("Erreur:", e$message), type = "error")
     })
   })
@@ -613,6 +867,43 @@ server <- function(input, output, session) {
   
   output$analysis_done <- reactive(!is.null(analysis_results()))
   outputOptions(output, "analysis_done", suspendWhenHidden = FALSE)
+
+  output$report_menu <- renderMenu({
+    req(report_obj())
+    menuItem("Rapport", tabName = "report", icon = icon("file-pdf"))
+  })
+
+  output$report_plot <- renderPlot({
+    report <- report_obj()
+    req(report)
+    report$figure
+  })
+
+  output$download_report <- downloadHandler(
+    filename = function() {
+      name <- input$athlete_name
+      if (is.null(name) || !nzchar(trimws(name))) {
+        name <- "rapport_saut"
+      } else {
+        name <- gsub("[^[:alnum:]]+", "_", tolower(trimws(name)))
+        name <- gsub("_+", "_", name)
+        name <- trimws(name, which = "both", whitespace = "_")
+        if (!nzchar(name)) name <- "rapport_saut"
+      }
+      paste0(name, "_", Sys.Date(), ".pdf")
+    },
+    content = function(file) {
+      report <- report_obj()
+      if (is.null(report)) {
+        stop("Rapport indisponible")
+      }
+      save_jump_report_pdf(report, file = file)
+    }
+  )
+
+  observeEvent(input$open_report_tab, {
+    updateTabItems(session, "tabs", "report")
+  }, ignoreNULL = TRUE)
   
   # === GRAPHIQUE PRINCIPAL ===
   output$main_plot <- renderPlot({

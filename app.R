@@ -324,6 +324,8 @@ analyze_jump_data_with_selection <- function(selected_data, body_mass,
     hpo <- NA
     Pmax <- NA
     Pmax_rel <- NA
+    F0 <- NA
+    V0 <- NA
     Vdec_opt <- NA
     SFVopt <- NA
 
@@ -377,9 +379,16 @@ analyze_jump_data_with_selection <- function(selected_data, body_mass,
       # ===== MÉTRIQUES SUPPLÉMENTAIRES =====
       hpo <- calculate_push_distance(velocity_data)
 
-      if (!is.na(mean_net_force_push) && !is.na(mean_velocity_push)) {
-        Pmax <- mean_net_force_push * mean_velocity_push
-        Pmax_rel <- Pmax / body_mass
+      if (!is.na(mean_net_force_push) && !is.na(mean_velocity_push) &&
+          !is.na(takeoff_velocity) && takeoff_velocity > 0) {
+        velocity_gap <- takeoff_velocity - mean_velocity_push
+
+        if (!is.na(velocity_gap) && velocity_gap > 0) {
+          F0 <- mean_net_force_push * (takeoff_velocity / velocity_gap)
+          V0 <- takeoff_velocity
+          Pmax <- (F0 * V0) / 4
+          Pmax_rel <- Pmax / body_mass
+        }
       }
 
       optimal_profile <- calculate_optimal_FV_profile(Pmax, body_mass, hpo)

@@ -319,6 +319,13 @@ analyze_jump_data_with_selection <- function(selected_data, body_mass,
     mean_velocity_push <- max_velocity_push <- NA
     velocity_data <- NULL
     
+    # Initialisation des nouvelles métriques
+    hpo <- NA
+    Pmax <- NA
+    Pmax_rel <- NA
+    Vdec_opt <- NA
+    SFVopt <- NA
+
     # ===== CALCULS DYNAMIQUES AVEC VITESSE =====
     if (!is.na(movement_start_time) && !is.na(takeoff_time)) {
       push_data <- selected_data %>%
@@ -361,15 +368,27 @@ analyze_jump_data_with_selection <- function(selected_data, body_mass,
       net_impulse <- sum(push_data$force_nette_N) * dt_mean
       takeoff_velocity <- net_impulse / body_mass
       jump_height <- (takeoff_velocity^2) / (2 * GRAVITY)
-      
+
       # ===== NOUVELLES MÉTRIQUES DE VITESSE =====
       mean_velocity_push <- mean(push_data$velocity_ms, na.rm = TRUE)
       max_velocity_push <- max(push_data$velocity_ms, na.rm = TRUE)
+
+      # ===== MÉTRIQUES SUPPLÉMENTAIRES =====
+      hpo <- calculate_push_distance(velocity_data)
+
+      if (!is.na(mean_net_force_push) && !is.na(mean_velocity_push)) {
+        Pmax <- mean_net_force_push * mean_velocity_push
+        Pmax_rel <- Pmax / body_mass
+      }
+
+      optimal_profile <- calculate_optimal_FV_profile(Pmax, body_mass, hpo)
+      Vdec_opt <- optimal_profile$Vdec_opt
+      SFVopt <- optimal_profile$SFVopt
     }
-    
-    validation <- validate_results(movement_start_time, takeoff_time, landing_time, 
+
+    validation <- validate_results(movement_start_time, takeoff_time, landing_time,
                                    push_time, flight_time)
-    
+
     result <- JumpAnalysisResult(
       body_mass = body_mass,
       body_weight = body_weight,
@@ -393,10 +412,15 @@ analyze_jump_data_with_selection <- function(selected_data, body_mass,
       mean_velocity_push = mean_velocity_push,
       max_velocity_push = max_velocity_push,
       velocity_data = velocity_data,
+      hpo = hpo,
+      Pmax = Pmax,
+      Pmax_rel = Pmax_rel,
+      Vdec_opt = Vdec_opt,
+      SFVopt = SFVopt,
       is_valid = validation$is_valid,
       validation_messages = validation$messages
     )
-    
+
     return(result)
     
   }, error = function(e) {
@@ -717,9 +741,10 @@ server <- function(input, output, session) {
         "Début mouvement", "Décollage", "Atterrissage",
         "Temps poussée", "Temps vol",
         "Force moy poussée", "Force nette moy",
-        "Impulsion nette", 
+        "Impulsion nette",
         "Vitesse MOY poussée", "Vitesse MAX poussée", "Vitesse décollage",
         "Hauteur saut",
+        "Distance poussée (hpo)", "Puissance maximale (Pmax)", "Pente optimale (SFVopt)",
         "Validité"
       ),
       Valeur = c(
@@ -738,6 +763,9 @@ server <- function(input, output, session) {
         if(is.na(results$max_velocity_push)) "N/A" else paste(round(results$max_velocity_push, 2), "m/s"),
         if(is.na(results$takeoff_velocity)) "N/A" else paste(round(results$takeoff_velocity, 2), "m/s"),
         if(is.na(results$jump_height)) "N/A" else paste(round(results$jump_height * 100, 1), "cm"),
+        if(is.na(results$hpo)) "N/A" else paste(round(results$hpo * 100, 1), "cm"),
+        if(is.na(results$Pmax)) "N/A" else paste(round(results$Pmax, 1), "W"),
+        if(is.na(results$SFVopt)) "N/A" else paste(round(results$SFVopt, 1), "N/(m/s)"),
         ifelse(results$is_valid, "✓ Valide", "✗ Non valide")
       )
     )

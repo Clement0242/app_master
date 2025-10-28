@@ -638,7 +638,7 @@ ui <- dashboardPage(
   dashboardHeader(title = "Analyse Saut + Vitesse"),
   
   dashboardSidebar(
-    sidebarMenu(
+    sidebarMenu(id = "tabs",
       menuItem("Analyse", tabName = "analysis", icon = icon("chart-line")),
       menuItem("Vitesse", tabName = "velocity", icon = icon("tachometer-alt")),
       menuItemOutput("report_menu"),
@@ -693,7 +693,9 @@ ui <- dashboardPage(
                   condition = "output.analysis_done",
                   box(
                     title = "Résultats", status = "info", solidHeader = TRUE, width = 12,
-                    tableOutput("results_table")
+                    tableOutput("results_table"),
+                    br(),
+                    actionButton("open_report_tab", "Voir le rapport complet", icon = icon("file-pdf"), class = "btn-primary")
                   )
                 )
               )
@@ -898,6 +900,10 @@ server <- function(input, output, session) {
       save_jump_report_pdf(report, file = file)
     }
   )
+
+  observeEvent(input$open_report_tab, {
+    updateTabItems(session, "tabs", "report")
+  }, ignoreNULL = TRUE)
   
   # === GRAPHIQUE PRINCIPAL ===
   output$main_plot <- renderPlot({

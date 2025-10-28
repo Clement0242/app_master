@@ -255,31 +255,32 @@ calculate_optimal_FV_profile <- function(Pmax, body_mass, hpo) {
   }
   
   tryCatch({
-    # Formule de Samozino et al. (2012)
-    # Vitesse de décollage théorique optimale
-    # Vdec_opt = sqrt(Pmax × hpo / body_mass)
-    
-    Vdec_opt <- sqrt((Pmax * hpo) / body_mass)
-    
-    # Pente optimale de la relation force-vitesse (Slope Force-Velocity optimal)
-    # SFVopt = -(Pmax / Vdec_opt²)
-    # ou de façon équivalente : SFVopt = -body_mass / hpo
-    
-    SFVopt <- -(body_mass * GRAVITY) / hpo
-    
-    # Vérifications de cohérence
-    if (Vdec_opt < 0 || Vdec_opt > 5) {
-      warning(paste("Vdec_opt incohérent:", round(Vdec_opt, 2), "m/s"))
+    # Formules de Samozino et Morin (2008, 2012)
+
+    # Calcul de la vitesse de décollage optimale
+    # Vdec_opt^2 = 2 * hpo * ((Pmax / (m * hpo)) - (g / 2))
+    term_inside_sqrt <- 2 * hpo * ((Pmax / (body_mass * hpo)) - (GRAVITY / 2))
+
+    if (term_inside_sqrt <= 0) {
+      warning("Impossible de calculer Vdec_opt : argument négatif sous la racine")
       return(list(Vdec_opt = NA, SFVopt = NA))
     }
-    
-    if (abs(SFVopt) < 100 || abs(SFVopt) > 10000) {
-      warning(paste("SFVopt incohérent:", round(SFVopt, 1), "N/(m/s)"))
+
+    Vdec_opt <- sqrt(term_inside_sqrt)
+
+    # Calcul de la pente optimale force-vitesse
+    # SFVopt = - (g * (hpo + Vdec_opt^2 / (2 * g))) / (2 * (Pmax / m))
+    denominator <- 2 * (Pmax / body_mass)
+
+    if (denominator == 0) {
+      warning("Impossible de calculer SFVopt : dénominateur nul")
       return(list(Vdec_opt = NA, SFVopt = NA))
     }
-    
+
+    SFVopt <- - (GRAVITY * (hpo + (Vdec_opt^2 / (2 * GRAVITY)))) / denominator
+
     return(list(Vdec_opt = Vdec_opt, SFVopt = SFVopt))
-    
+
   }, error = function(e) {
     warning(paste("Erreur calcul profil optimal:", e$message))
     return(list(Vdec_opt = NA, SFVopt = NA))
